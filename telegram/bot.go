@@ -1,21 +1,27 @@
 package telegram
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"github.com/tecnologer/telegram-bot-api/models"
 )
 
 var (
 	urlBase string = "https://api.telegram.org/bot%s"
 )
+
+var allMsg func(context.Context, *models.Update)
 
 type Bot struct {
 	token           string
@@ -53,6 +59,40 @@ func (b *Bot) GetMe() (*models.User, error) {
 	return body.Result, nil
 }
 
+func (b *Bot) SendTextMessage(chatID int, text string, replyTo int, parseMode models.ParseMode) error {
+	return b.SendMessage(&models.SendMessage{
+		ChatID:                   chatID,
+		Text:                     text,
+		ReplyToMessageID:         replyTo,
+		ParseMode:                parseMode,
+		AllowSendingWithoutReply: true,
+		ReplyMarkup:              "{}",
+	})
+}
+
+func (b *Bot) SendMessage(message *models.SendMessage) error {
+	endpoint := urlBase + "/sendMessage"
+
+	body, err := json.Marshal(message)
+	if err != nil {
+		return errors.Wrap(err, "parsing message to json body")
+	}
+
+	res, err := http.Post(endpoint, "application/json", bytes.NewBuffer(body))
+
+	if err != nil {
+		return errors.Wrap(err, "sending message")
+	}
+
+	defer res.Body.Close()
+
+	if res.StatusCode != 200 {
+		return fmt.Errorf("error seding message. Status code: %d", res.StatusCode)
+	}
+
+	return nil
+}
+
 type UpdateConfig struct {
 	Offset  int
 	Limit   int
@@ -60,21 +100,21 @@ type UpdateConfig struct {
 }
 type UpdatesChannel struct{}
 
-// GetUpdatesChan starts and returns a channel for getting updates.
-func (bot *Bot) GetUpdatesChan(config UpdateConfig) (chan *models.Update, error) {
+// getUpdatesChan starts and returns a channel for getting updates.
+func (b *Bot) getUpdatesChan(config UpdateConfig) (chan *models.Update, error) {
 	ch := make(chan *models.Update)
 
 	go func() {
 		for {
 			select {
 			//TODO: Implement stop method
-			case <-bot.shutdownChannel:
+			case <-b.shutdownChannel:
 				close(ch)
 				return
 			default:
 			}
 
-			updates, err := bot.GetUpdates(config)
+			updates, err := b.getUpdates(config)
 			if err != nil {
 				log.Println(err)
 				log.Println("Failed to get updates, retrying in 3 seconds...")
@@ -95,14 +135,14 @@ func (bot *Bot) GetUpdatesChan(config UpdateConfig) (chan *models.Update, error)
 	return ch, nil
 }
 
-// GetUpdates fetches updates.
+// getUpdates fetches updates.
 // If a WebHook is set, this will not return any data!
 //
 // Offset, Limit, and Timeout are optional.
 // To avoid stale items, set Offset to one higher than the previous item.
 // Set Timeout to a large number to reduce requests so you can get updates
 // instantly instead of having to wait between requests.
-func (bot *Bot) GetUpdates(config UpdateConfig) ([]*models.Update, error) {
+func (b *Bot) getUpdates(config UpdateConfig) ([]*models.Update, error) {
 	endpoint := urlBase + "/getUpdates"
 	v := url.Values{}
 	if config.Offset != 0 {
@@ -126,4 +166,40 @@ func (bot *Bot) GetUpdates(config UpdateConfig) ([]*models.Update, error) {
 	json.Unmarshal(bodyRes.Result, &updates)
 
 	return updates, nil
+}
+
+//SetCommand set action to a command starting with /
+func (b *Bot) SetCommand(cmd string, callback func(context.Context, *models.Update)) {
+	if callback == nil {
+		logrus.Info("callback function is required for a command")
+		return
+	}
+
+	if commands == nil {
+		commands = make(map[string]func(context.Context, *models.Update))
+	}
+
+	if !strings.HasPrefix(cmd, "/") {
+		cmd = "/" + cmd
+	}
+	commands[cmd] = callback
+}
+
+func (b *Bot) Start(ctx context.Context) {
+	chanUpdates, err := b.getUpdatesChan(UpdateConfig{})
+	if err != nil {
+		logrus.WithError(err).Error("register for updates")
+		return
+	}
+	for update := range chanUpdates {
+		validateCmd(ctx, update)
+
+		if allMsg != nil {
+			allMsg(ctx, update)
+		}
+	}
+}
+
+func (b *Bot) AllMessage(fn func(context.Context, *models.Update)) {
+	allMsg = fn
 }
