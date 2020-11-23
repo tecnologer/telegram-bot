@@ -26,6 +26,7 @@ var allMsg func(context.Context, *models.Update)
 type Bot struct {
 	token           string
 	shutdownChannel chan interface{}
+	isWebhookSet    bool
 }
 
 func NewBot(token string) *Bot {
@@ -187,6 +188,21 @@ func (b *Bot) SetCommand(cmd string, callback func(context.Context, *models.Upda
 
 func (b *Bot) Start(ctx context.Context) {
 	chanUpdates, err := b.getUpdatesChan(UpdateConfig{})
+	if err != nil {
+		logrus.WithError(err).Error("register for updates")
+		return
+	}
+	for update := range chanUpdates {
+		validateCmd(ctx, update)
+
+		if allMsg != nil {
+			allMsg(ctx, update)
+		}
+	}
+}
+
+func (b *Bot) StartWithWebhook(url string, ctx context.Context) {
+	chanUpdates, err := b.setWebHook(url)
 	if err != nil {
 		logrus.WithError(err).Error("register for updates")
 		return
