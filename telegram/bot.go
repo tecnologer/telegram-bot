@@ -2,7 +2,6 @@ package telegram
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -17,31 +16,48 @@ import (
 	"github.com/tecnologer/telegram-bot-api/models"
 )
 
-var (
+const (
 	urlBase string = "https://api.telegram.org/bot%s"
 )
 
-var allMsg func(context.Context, *models.Update)
+//UpdateConfig configuration for long polling updates
+type UpdateConfig struct {
+	Offset  int
+	Limit   int
+	Timeout int
+}
 
+var allMsg func(*models.Update)
+
+//Bot base struct for telegram bot
 type Bot struct {
 	token           string
 	shutdownChannel chan interface{}
 	isWebhookSet    bool
+	url             string
+	commands        map[string]func(*models.Update)
 }
 
+//NewBot creates a new bot with especific token
 func NewBot(token string) *Bot {
-	urlBase = fmt.Sprintf(urlBase, token)
 	return &Bot{
 		token: token,
+		url:   fmt.Sprintf(urlBase, token),
 	}
+}
+
+func (b *Bot) getEndpoint(action string) string {
+	separator := ""
+	if !strings.HasPrefix(action, "/") {
+		separator = "/"
+	}
+	return fmt.Sprintf("%s%s%s", b.url, separator, action)
 }
 
 // GetMe A simple method for testing your bot's auth token. Requires no parameters.
 // Returns basic information about the bot in form of a User object.
 func (b *Bot) GetMe() (*models.User, error) {
-	endpoint := urlBase + "/getMe"
-
-	res, err := http.Get(endpoint)
+	res, err := http.Get(b.getEndpoint("getMe"))
 
 	if err != nil {
 		return nil, errors.Wrap(err, "Get met: error calling the end-point")
@@ -60,26 +76,26 @@ func (b *Bot) GetMe() (*models.User, error) {
 	return body.Result, nil
 }
 
-func (b *Bot) SendTextMessage(chatID int, text string, replyTo int, parseMode models.ParseMode) error {
+//SendTextMessage send text message to the specific chat
+func (b *Bot) SendTextMessage(chatID int, text string, replyTo int) error {
 	return b.SendMessage(&models.SendMessage{
 		ChatID:                   chatID,
 		Text:                     text,
 		ReplyToMessageID:         replyTo,
-		ParseMode:                parseMode,
+		ParseMode:                models.Markdown2,
 		AllowSendingWithoutReply: true,
 		ReplyMarkup:              "{}",
 	})
 }
 
+//SendMessage send any kind of message to specific chat
 func (b *Bot) SendMessage(message *models.SendMessage) error {
-	endpoint := urlBase + "/sendMessage"
-
 	body, err := json.Marshal(message)
 	if err != nil {
 		return errors.Wrap(err, "parsing message to json body")
 	}
 
-	res, err := http.Post(endpoint, "application/json", bytes.NewBuffer(body))
+	res, err := http.Post(b.getEndpoint("sendMessage"), "application/json", bytes.NewBuffer(body))
 
 	if err != nil {
 		return errors.Wrap(err, "sending message")
@@ -93,13 +109,6 @@ func (b *Bot) SendMessage(message *models.SendMessage) error {
 
 	return nil
 }
-
-type UpdateConfig struct {
-	Offset  int
-	Limit   int
-	Timeout int
-}
-type UpdatesChannel struct{}
 
 // getUpdatesChan starts and returns a channel for getting updates.
 func (b *Bot) getUpdatesChan(config UpdateConfig) (chan *models.Update, error) {
@@ -144,7 +153,6 @@ func (b *Bot) getUpdatesChan(config UpdateConfig) (chan *models.Update, error) {
 // Set Timeout to a large number to reduce requests so you can get updates
 // instantly instead of having to wait between requests.
 func (b *Bot) getUpdates(config UpdateConfig) ([]*models.Update, error) {
-	endpoint := urlBase + "/getUpdates"
 	v := url.Values{}
 	if config.Offset != 0 {
 		v.Add("offset", strconv.Itoa(config.Offset))
@@ -156,7 +164,7 @@ func (b *Bot) getUpdates(config UpdateConfig) ([]*models.Update, error) {
 		v.Add("timeout", strconv.Itoa(config.Timeout))
 	}
 
-	resp, err := http.Post(endpoint, "", nil)
+	resp, err := http.Post(b.getEndpoint("getUpdates"), "", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -169,53 +177,61 @@ func (b *Bot) getUpdates(config UpdateConfig) ([]*models.Update, error) {
 	return updates, nil
 }
 
-//SetCommand set action to a command starting with /
-func (b *Bot) SetCommand(cmd string, callback func(context.Context, *models.Update)) {
+//SetCommand assign action to command starting with '/' (I.e: /start)
+func (b *Bot) SetCommand(cmd string, callback func(*models.Update)) error {
 	if callback == nil {
-		logrus.Info("callback function is required for a command")
-		return
+		return fmt.Errorf("callback function is required for a command")
 	}
 
-	if commands == nil {
-		commands = make(map[string]func(context.Context, *models.Update))
+	if b.commands == nil {
+		b.commands = make(map[string]func(*models.Update))
 	}
 
 	if !strings.HasPrefix(cmd, "/") {
 		cmd = "/" + cmd
 	}
-	commands[cmd] = callback
+	b.commands[cmd] = callback
+	return nil
 }
 
-func (b *Bot) Start(ctx context.Context) {
+//Start starts the bot with long polling
+func (b *Bot) Start() {
+	if b.isWebhookSet {
+		logrus.Error("starting with long polling: weebhook is configured")
+		return
+	}
+
 	chanUpdates, err := b.getUpdatesChan(UpdateConfig{})
 	if err != nil {
 		logrus.WithError(err).Error("register for updates")
 		return
 	}
 	for update := range chanUpdates {
-		validateCmd(ctx, update)
+		b.validateCmd(update)
 
 		if allMsg != nil {
-			allMsg(ctx, update)
+			allMsg(update)
 		}
 	}
 }
 
-func (b *Bot) StartWithWebhook(url string, ctx context.Context) {
-	chanUpdates, err := b.setWebHook(url)
+//StartWithWebhook starts the bot using webhook
+func (b *Bot) StartWithWebhook(url string, port int) {
+	chanUpdates, err := b.setWebHook(url, port)
 	if err != nil {
 		logrus.WithError(err).Error("register for updates")
 		return
 	}
 	for update := range chanUpdates {
-		validateCmd(ctx, update)
+		b.validateCmd(update)
 
 		if allMsg != nil {
-			allMsg(ctx, update)
+			allMsg(update)
 		}
 	}
 }
 
-func (b *Bot) AllMessage(fn func(context.Context, *models.Update)) {
+//AllMessage redirect all messages to the function (fn)
+func (b *Bot) AllMessage(fn func(*models.Update)) {
 	allMsg = fn
 }

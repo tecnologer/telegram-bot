@@ -33,7 +33,6 @@ type userResponse struct {
 }
 
 type webhookResponse struct {
-	//{"ok":true,"result":true,"description":"Webhook was set"}
 	OK          bool   `json:"ok"`
 	Result      bool   `json:"result"`
 	Description string `json:"description"`
@@ -43,7 +42,7 @@ func decodeUserBody(res *http.Response) (body *userResponse, err error) {
 	body = &userResponse{}
 	err = json.NewDecoder(res.Body).Decode(body)
 	if err != nil {
-		return nil, errors.Wrap(err, "parsing response (json) to user")
+		return nil, errors.Wrap(err, "decode user body: parsing response (json) to user")
 	}
 
 	return
@@ -53,7 +52,7 @@ func decodeWebhookResponse(res *http.Response) (body *webhookResponse, err error
 	body = &webhookResponse{}
 	err = json.NewDecoder(res.Body).Decode(body)
 	if err != nil {
-		return nil, errors.Wrap(err, "parsing response (json) to user")
+		return nil, errors.Wrap(err, "decoding webhook response: parsing response (json) to user")
 	}
 
 	return
